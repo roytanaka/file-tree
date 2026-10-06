@@ -15,6 +15,10 @@ declare module 'claude-code' {
       status: Record<RelPath, GitMark>
       /** Ignored paths shown dimmed; a folder ends in `/` and is not descended. */
       ignored: RelPath[]
+      /** Show only files with a git mark or edited this turn. */
+      changedOnly: boolean
+      /** Folders collapsed in the changed-only view, where folders start open. */
+      folded: RelPath[]
     }
   }
 }

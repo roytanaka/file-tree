@@ -1,7 +1,7 @@
 import { describe, expect, mock, test } from 'claude-code/testing'
 
 import { fileIcon } from '../hooks/icons'
-import { ancestors, collapseIgnored, flatten, folderMarks, isIgnored, parseGitignore, parseStatus, relativeTo } from '../hooks/tree'
+import { ancestors, changedView, collapseIgnored, flatten, folderMarks, isIgnored, parseGitignore, parseStatus, relativeTo } from '../hooks/tree'
 
 describe('gitignore', () => {
   const rules = parseGitignore('node_modules/\n*.log\n/dist\n!keep.log\nsrc/**/gen\n')
@@ -49,6 +49,15 @@ describe('git status', () => {
     expect(folderMarks({ 'src/x/a.ts': 'U', 'src/b.ts': 'M', 'lib/c.ts': 'A' })).toEqual({
       src: 'M', 'src/x': 'U', lib: 'A',
     })
+  })
+})
+
+describe('changed view', () => {
+  test('keeps marked and edited files; their folders open unless folded', async () => {
+    const files = ['a.ts', 'src/b.ts', 'src/lib/c.ts', 'docs/d.md']
+    const view = changedView(files, { 'src/lib/c.ts': 'M' }, ['a.ts'], new Set(['src/lib']))
+    expect(view.files).toEqual(['a.ts', 'src/lib/c.ts'])
+    expect([...view.open]).toEqual(['src'])
   })
 })
 
@@ -103,7 +112,7 @@ test('pane highlights edited files and toggles folders', async ($, on) => {
   on('tool.call', async () => ({ result: 'ok' }) as never)
   on('turn.start', async (_, e) => ({ turnId: e.turnId }))
 
-  await $.command.run({ command: 'tree' } as never)
+  await $.command.run({ command: 'tree', args: '' } as never)
   await $.turn.start({ text: 'go', turnId: 't1' } as never)
   await $.tool.call({ tool: 'Edit', file_path: '/repo/src/a.ts', old_string: 'a', new_string: 'b' } as never)
 
@@ -144,7 +153,7 @@ test('icons: none draws no glyphs', { options: { icons: 'none' } }, async ($, on
   })
   on('ui.panes', async () => ({ value: [] }) as never)
   on('ui.open', async () => ({ value: undefined }) as never)
-  await $.command.run({ command: 'tree' } as never)
+  await $.command.run({ command: 'tree', args: '' } as never)
   const ui = await $.ui.mount({ plugin: 'file-tree', surface: 'terminal', ...PANE })
   expect(await ui.find({ key: 'file:a.js' })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /\u{e74e}/u })).toBeUndefined()
@@ -173,7 +182,7 @@ test('rescans every 5s while open, and stops once closed', async ($, on) => {
     return { value: undefined } as never
   })
 
-  await $.command.run({ command: 'tree' } as never)
+  await $.command.run({ command: 'tree', args: '' } as never)
   const ui = await $.ui.mount({ plugin: 'file-tree', surface: 'terminal', ...PANE })
   expect(await ui.find({ key: 'file:new.js' })).toBeUndefined()
 
@@ -181,7 +190,7 @@ test('rescans every 5s while open, and stops once closed', async ($, on) => {
   await clock.advance(5000)
   expect(await ui.find({ key: 'file:new.js' })).toBeDefined()
 
-  await $.command.run({ command: 'tree' } as never)
+  await $.command.run({ command: 'tree', args: '' } as never)
   const before = lsRuns
   await clock.advance(20000)
   expect(lsRuns).toBe(before)
@@ -201,7 +210,7 @@ for (const mode of ['dim', 'hide'] as const) {
     })
     on('ui.panes', async () => ({ value: [] }) as never)
     on('ui.open', async () => ({ value: undefined }) as never)
-    await $.command.run({ command: 'tree' } as never)
+    await $.command.run({ command: 'tree', args: '' } as never)
     const ui = await $.ui.mount({ plugin: 'file-tree', surface: 'desktop', ...PANE })
     expect(await ui.find({ key: 'file:a.js' })).toBeDefined()
     expect(await ui.find({ key: 'file:.DS_Store' })).toBeUndefined()
@@ -235,7 +244,7 @@ test('clicking a file opens it in VS Code, falling back to open -a; deleted file
   on('ui.panes', async () => ({ value: [] }) as never)
   on('ui.open', async () => ({ value: { isPlaced: true } }) as never)
 
-  await $.command.run({ command: 'tree' } as never)
+  await $.command.run({ command: 'tree', args: '' } as never)
   const tree = await $.ui.mount({ plugin: 'file-tree', surface: 'terminal', ...PANE })
 
   await tree.press({ key: 'file:app.js' })
@@ -248,4 +257,38 @@ test('clicking a file opens it in VS Code, falling back to open -a; deleted file
   const before = runs.length
   await tree.press({ key: 'file:gone.js' })
   expect(runs.length).toBe(before)
+})
+
+test('the filter shows only changed files, from the button or /tree changed', async ($, on) => {
+  const panes: { id: string }[] = []
+  on('session.cwd', async () => ({ value: '/repo' }) as never)
+  on('process.run', async (_, e) => {
+    const argv = (e as { argv?: string[] }).argv ?? (e as unknown as string[][])[0] ?? []
+    const stdout =
+      argv[1] === 'rev-parse' ? '/repo\n'
+      : argv[1] === 'status' ? ' M src/lib/b.ts\0'
+      : argv.includes('--ignored') ? 'debug.log\0'
+      : 'src/a.ts\0src/lib/b.ts\0top.md\0'
+    return { value: { exitCode: 0, stdout, stderr: '' } } as never
+  })
+  on('ui.panes', async () => ({ value: panes }) as never)
+  on('ui.open', async (_, e) => {
+    panes.push({ id: e.id })
+    return { value: undefined } as never
+  })
+
+  await $.command.run({ command: 'tree', args: '' } as never)
+  const ui = await $.ui.mount({ plugin: 'file-tree', surface: 'desktop', ...PANE })
+  expect(await ui.find({ key: 'file:top.md' })).toBeDefined()
+
+  await ui.press({ key: 'filter' })
+  expect(await ui.find({ key: 'file:top.md' })).toBeUndefined()
+  expect(await ui.find({ key: 'file:debug.log' })).toBeUndefined()
+  expect(await ui.find({ key: 'file:src/lib/b.ts' })).toBeDefined()
+  await ui.press({ key: 'dir:src/lib' })
+  expect(await ui.find({ key: 'file:src/lib/b.ts' })).toBeUndefined()
+
+  await $.command.run({ command: 'tree', args: 'changed' } as never)
+  expect(await ui.find({ key: 'file:top.md' })).toBeDefined()
+  expect(await ui.find({ key: 'file:src/lib/b.ts' })).toBeUndefined()
 })

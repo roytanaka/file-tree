@@ -5,7 +5,7 @@ import type { GitMark } from '../types'
 import { FOLDER_CLOSED, FOLDER_OPEN, fileIcon } from './icons'
 import { scan } from './scan'
 import type { Ports, ScanOptions, Snapshot } from './scan'
-import { ancestors, flatten, folderMarks, relativeTo } from './tree'
+import { ancestors, changedView, flatten, folderMarks, relativeTo } from './tree'
 
 const PANE = 'file-tree'
 // The viewer tab of an earlier version; closed if a session still has it open.
@@ -20,6 +20,8 @@ const edited = atom({ plugin: 'file-tree', key: 'edited' } as const, [])
 const error = atom({ plugin: 'file-tree', key: 'error' } as const, '')
 const status = atom({ plugin: 'file-tree', key: 'status' } as const, {})
 const ignored = atom({ plugin: 'file-tree', key: 'ignored' } as const, [])
+const changedOnly = atom({ plugin: 'file-tree', key: 'changedOnly' } as const, false)
+const folded = atom({ plugin: 'file-tree', key: 'folded' } as const, [])
 
 const MARK_COLOR: Record<GitMark, string> = {
   M: 'warning', A: 'success', U: 'success', D: 'error', R: 'suggestion', C: 'merged',
@@ -101,13 +103,25 @@ export const register: Register = (on, options) => {
     await $.command.register({
       name: 'tree',
       description: 'Toggle the file tree pane (respects .gitignore, highlights files edited this turn)',
+      argumentHint: '[changed]',
     })
     if (await isPaneOpen($, OLD_VIEWER)) await $.ui.close({ id: OLD_VIEWER })
     if (await isOpen($)) startPolling($, scanOpts)
     return next(e)
   })
 
-  on('command.run', { command: 'tree' }, async $ => {
+  on('command.run', { command: 'tree' }, async ($, e) => {
+    // `/tree changed` flips the changed-only filter, opening the pane if it's closed.
+    if (e.args.trim() === 'changed') {
+      const isOn = !(await read($, changedOnly))
+      await update($, changedOnly, () => isOn)
+      if (!(await isOpen($))) {
+        await rescan($, scanOpts)
+        await $.ui.open({ id: PANE, title: 'Files' })
+        startPolling($, scanOpts)
+      }
+      return { text: isOn ? 'File tree: changed files only.' : 'File tree: all files.' }
+    }
     if (await isOpen($)) {
       await $.ui.close({ id: PANE })
       return { text: 'File tree closed.' }
@@ -173,24 +187,34 @@ export const register: Register = (on, options) => {
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     const { Box, Text, Button } = $.ui.resolve(e)
     const hasIcons = wantsIcons && e.surface === 'terminal'
-    const [list, open, touched, problem, marks, skipped] = await Promise.all([
+    const [list, open, touched, problem, marks, skipped, onlyChanged, shut] = await Promise.all([
       read($, files), read($, expanded), read($, edited), read($, error), read($, status),
-      read($, ignored),
+      read($, ignored), read($, changedOnly), read($, folded),
     ])
     const skippedSet = new Set(skipped)
     const dirMarks = folderMarks(marks)
     const touchedSet = new Set(touched)
     const hot = new Set(touched.flatMap(ancestors))
-    const rows = flatten([...list, ...skipped], new Set(open))
+    const changed = onlyChanged ? changedView(list, marks, touched, new Set(shut)) : undefined
+    const rows = changed ? flatten(changed.files, changed.open) : flatten([...list, ...skipped], new Set(open))
     const shown = rows.slice(0, MAX_ROWS)
 
+    // Each view keeps its own folder state: `expanded` for all files, `folded` for changed only.
+    const flip = (cur: string[], path: string) => (cur.includes(path) ? cur.filter(p => p !== path) : [...cur, path])
     const toggle = (path: string) => () =>
-      void update($, expanded, cur => (cur.includes(path) ? cur.filter(p => p !== path) : [...cur, path]))
+      void (onlyChanged ? update($, folded, cur => flip(cur, path)) : update($, expanded, cur => flip(cur, path)))
 
     return (
       <Box flexDirection="column">
+        <Box>
+          <Text dimColor>{onlyChanged ? '◉ ' : '○ '}</Text>
+          <Button plain key="filter" onPress={() => void update($, changedOnly, cur => !cur)}>
+            {onlyChanged ? 'Changed files' : 'All files'}
+          </Button>
+        </Box>
         {problem !== '' && <Text color="red" wrap="truncate">{problem}</Text>}
         {list.length === 0 && <Text dimColor>No files.</Text>}
+        {list.length > 0 && changed?.files.length === 0 && <Text dimColor>No changed files.</Text>}
         {shown.map(row => {
           const indent = '  '.repeat(row.depth)
           if (row.isDir && skippedSet.has(`${row.path}/`)) {

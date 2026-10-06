@@ -131,3 +131,17 @@ export function collapseIgnored(paths: readonly string[]): string[] {
   const dirs = paths.filter(p => p.endsWith('/'))
   return paths.filter(p => !isHidden(p) && !dirs.some(d => p !== d && p.startsWith(d)))
 }
+
+// The changed-only view: files with a git mark or edited this turn, plus the
+// folders that hold them (all open unless folded).
+export function changedView(
+  files: readonly string[],
+  status: Readonly<Record<string, GitMark>>,
+  edited: readonly string[],
+  folded: ReadonlySet<string>,
+): { files: string[]; open: Set<string> } {
+  const changed = new Set([...Object.keys(status), ...edited])
+  const kept = files.filter(f => changed.has(f))
+  const open = new Set(kept.flatMap(ancestors).filter(d => !folded.has(d)))
+  return { files: kept, open }
+}
