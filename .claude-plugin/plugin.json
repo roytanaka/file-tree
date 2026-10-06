@@ -1,0 +1,28 @@
+{
+  "name": "file-tree",
+  "version": "0.1.0",
+  "description": "Docked, collapsible file tree of the repo (respects .gitignore) that highlights files edited this turn. Toggle with /tree.",
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "icons": {
+      "type": "string",
+      "title": "File icons",
+      "description": "Nerd Font icons in the tree (needs a Nerd Font in your terminal); 'none' turns them off.",
+      "options": [
+        "nerd",
+        "none"
+      ],
+      "default": "nerd"
+    },
+    "ignored": {
+      "type": "string",
+      "title": "Ignored files",
+      "description": "How .gitignored files show in the tree: 'dim' lists them greyed out (ignored folders as one row), 'hide' leaves them out. .DS_Store is always hidden.",
+      "options": [
+        "dim",
+        "hide"
+      ],
+      "default": "dim"
+    }
+  }
+}
