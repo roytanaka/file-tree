@@ -1,5 +1,7 @@
 // Pure helpers: .gitignore matching (fallback when not in a git repo) and tree flattening.
 
+import type { GitMark } from '../types'
+
 export type Rule = { re: RegExp; negate: boolean; dirOnly: boolean }
 
 export function parseGitignore(text: string, base = ''): Rule[] {
@@ -85,9 +87,6 @@ export function relativeTo(root: string, path: string): string | undefined {
   const r = root.endsWith('/') ? root : root + '/'
   return path.startsWith(r) ? path.slice(r.length) : undefined
 }
-
-// Git status, one letter per path as VS Code shows it.
-export type GitMark = 'M' | 'A' | 'D' | 'R' | 'U' | 'C'
 
 // Strongest first: a folder takes the mark of its strongest descendant.
 export const MARK_ORDER: readonly GitMark[] = ['C', 'M', 'D', 'R', 'A', 'U']

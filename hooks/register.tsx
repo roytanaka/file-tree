@@ -1,17 +1,17 @@
 import { atom, read, update } from 'claude-code'
-import type { EngineInterface as Engine, FsEntry, Register, Timer, UiPane } from 'claude-code'
+import type { EngineInterface as Engine, Register, Timer, UiPane } from 'claude-code'
 
+import type { GitMark } from '../types'
 import { FOLDER_CLOSED, FOLDER_OPEN, fileIcon } from './icons'
-import { ancestors, collapseIgnored, flatten, isHidden, folderMarks, isIgnored, parseGitignore, parseStatus, relativeTo } from './tree'
-import type { GitMark, Rule } from './tree'
+import { scan } from './scan'
+import type { Ports, ScanOptions, Snapshot } from './scan'
+import { ancestors, flatten, folderMarks, relativeTo } from './tree'
 
 const PANE = 'file-tree'
 // The viewer tab of an earlier version; closed if a session still has it open.
 const OLD_VIEWER = 'file-view'
-const MAX_FILES = 20000
 const MAX_ROWS = 3000
 const POLL_MS = 5000
-const SKIP = new Set(['.git', 'node_modules'])
 
 const root = atom({ plugin: 'file-tree', key: 'root' } as const, '')
 const files = atom({ plugin: 'file-tree', key: 'files' } as const, [])
@@ -20,9 +20,6 @@ const edited = atom({ plugin: 'file-tree', key: 'edited' } as const, [])
 const error = atom({ plugin: 'file-tree', key: 'error' } as const, '')
 const status = atom({ plugin: 'file-tree', key: 'status' } as const, {})
 const ignored = atom({ plugin: 'file-tree', key: 'ignored' } as const, [])
-
-// The `ignored` setting, read once per load of the module.
-let showIgnored = true
 
 const MARK_COLOR: Record<GitMark, string> = {
   M: 'warning', A: 'success', U: 'success', D: 'error', R: 'suggestion', C: 'merged',
@@ -33,68 +30,28 @@ function same(a: unknown, b: unknown) {
   return JSON.stringify(a) === JSON.stringify(b)
 }
 
-// git ls-files when in a repo (exact .gitignore semantics); otherwise walk the
-// tree ourselves, honouring every .gitignore we meet.
-async function scan($: Engine) {
-  const cwd = await $.session.cwd()
-  const top = await $.process.run(['git', 'rev-parse', '--show-toplevel'], { cwd }).catch(() => undefined)
-  if (top && top.exitCode === 0) {
-    const dir = top.stdout.trim()
-    const ls = await $.process.run(
-      ['git', 'ls-files', '--cached', '--others', '--exclude-standard', '-z'],
-      { cwd: dir },
-    )
-    const list = [...new Set(ls.stdout.split('\0').filter(p => p !== '' && !isHidden(p)))].slice(0, MAX_FILES)
-    let skipped: string[] = []
-    if (showIgnored) {
-      const ig = await $.process.run(
-        ['git', 'ls-files', '--others', '--ignored', '--exclude-standard', '--directory', '-z'],
-        { cwd: dir },
-      )
-      if (ig.exitCode === 0) skipped = collapseIgnored(ig.stdout.split('\0').filter(Boolean)).slice(0, MAX_FILES)
-    }
-    if (!same(await read($, ignored), skipped)) await update($, ignored, () => skipped)
-    const st = await $.process.run(
-      ['git', 'status', '--porcelain=v1', '-z', '--untracked-files=all'],
-      { cwd: dir },
-    )
-    const marks = st.exitCode === 0 ? parseStatus(st.stdout) : {}
-    if (!same(await read($, status), marks)) await update($, status, () => marks)
-    if (!same(await read($, root), dir)) await update($, root, () => dir)
-    if (!same(await read($, files), list)) await update($, files, () => list)
-    const problem = ls.exitCode === 0 ? '' : ls.stderr.trim()
-    if ((await read($, error)) !== problem) await update($, error, () => problem)
-    return
-  }
+async function commit($: Engine, snap: Snapshot) {
+  if (!same(await read($, ignored), snap.ignored)) await update($, ignored, () => snap.ignored)
+  if (!same(await read($, status), snap.status)) await update($, status, () => snap.status)
+  if (!same(await read($, root), snap.root)) await update($, root, () => snap.root)
+  if (!same(await read($, files), snap.files)) await update($, files, () => snap.files)
+  if (!same(await read($, error), snap.error)) await update($, error, () => snap.error)
+}
 
-  const list: string[] = []
-  const skipped: string[] = []
-  const walk = async (rel: string, rules: Rule[]) => {
-    if (list.length >= MAX_FILES) return
-    const abs = rel ? `${cwd}/${rel}` : cwd
-    const entries: FsEntry[] = await $.fs.list(abs).catch(() => [])
-    if (entries.some(en => en.name === '.gitignore' && en.kind === 'file')) {
-      const text = await $.fs.read(`${abs}/.gitignore`).catch(() => '')
-      rules = [...rules, ...parseGitignore(typeof text === 'string' ? text : '', rel)]
-    }
-    for (const en of entries) {
-      if (SKIP.has(en.name) || en.name === '.DS_Store') continue
-      const path = rel ? `${rel}/${en.name}` : en.name
-      const isDir = en.kind === 'dir'
-      if (isIgnored(rules, path, isDir)) {
-        if (showIgnored && skipped.length < MAX_FILES) skipped.push(isDir ? `${path}/` : path)
-        continue
-      }
-      if (isDir) await walk(path, rules)
-      else if (list.length < MAX_FILES) list.push(path)
-    }
+async function portsFrom($: Engine): Promise<Ports> {
+  return {
+    cwd: await $.session.cwd(),
+    run: (argv, cwd) => $.process.run(argv, { cwd }),
+    list: abs => $.fs.list(abs),
+    read: async abs => {
+      const text = await $.fs.read(abs)
+      return typeof text === 'string' ? text : ''
+    },
   }
-  await walk('', [])
-  if (!same(await read($, ignored), skipped)) await update($, ignored, () => skipped)
-  if (!same(await read($, status), {})) await update($, status, () => ({}))
-  if (!same(await read($, root), cwd)) await update($, root, () => cwd)
-  if (!same(await read($, files), list)) await update($, files, () => list)
-  if (!same(await read($, error), '')) await update($, error, () => '')
+}
+
+async function rescan($: Engine, opts: ScanOptions) {
+  await commit($, await scan(await portsFrom($), opts))
 }
 
 async function isPaneOpen($: Engine, id: string) {
@@ -122,11 +79,11 @@ async function openInEditor($: Engine, abs: string) {
 let ticker: Timer | undefined
 let isScanning = false
 
-function startPolling($: Engine) {
+function startPolling($: Engine, opts: ScanOptions) {
   ticker ??= $.clock.every(POLL_MS, () => {
     if (isScanning) return
     isScanning = true
-    void scan($).catch(() => {}).finally(() => { isScanning = false })
+    void rescan($, opts).catch(() => {}).finally(() => { isScanning = false })
   })
 }
 
@@ -138,7 +95,7 @@ function stopPolling() {
 export const register: Register = (on, options) => {
   // Nerd Font glyphs need the terminal's own font; other surfaces draw without them.
   const wantsIcons = options.icons !== 'none'
-  showIgnored = options.ignored !== 'hide'
+  const scanOpts: ScanOptions = { includeIgnored: options.ignored !== 'hide' }
 
   on('session.start', async ($, e, next) => {
     await $.command.register({
@@ -146,7 +103,7 @@ export const register: Register = (on, options) => {
       description: 'Toggle the file tree pane (respects .gitignore, highlights files edited this turn)',
     })
     if (await isPaneOpen($, OLD_VIEWER)) await $.ui.close({ id: OLD_VIEWER })
-    if (await isOpen($)) startPolling($)
+    if (await isOpen($)) startPolling($, scanOpts)
     return next(e)
   })
 
@@ -155,9 +112,9 @@ export const register: Register = (on, options) => {
       await $.ui.close({ id: PANE })
       return { text: 'File tree closed.' }
     }
-    await scan($)
+    await rescan($, scanOpts)
     await $.ui.open({ id: PANE, title: 'Files' })
-    startPolling($)
+    startPolling($, scanOpts)
     return { text: 'File tree opened.' }
   })
 
@@ -187,7 +144,7 @@ export const register: Register = (on, options) => {
 
   on('turn.complete', async ($, e, next) => {
     const done = await next(e)
-    if (await isOpen($)) await scan($).catch(() => {})
+    if (await isOpen($)) await rescan($, scanOpts).catch(() => {})
     return done
   })
 
@@ -205,7 +162,7 @@ export const register: Register = (on, options) => {
       if (rel !== undefined) {
         await update($, edited, list => (list.includes(rel) ? list : [...list, rel]))
         await update($, expanded, list => [...new Set([...list, ...ancestors(rel)])])
-        if (await isOpen($)) await scan($)
+        if (await isOpen($)) await rescan($, scanOpts)
       }
     } catch {
       // Bookkeeping only; never let it affect the tool's result.
