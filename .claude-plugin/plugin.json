@@ -1,6 +1,6 @@
 {
   "name": "file-tree",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Docked, collapsible file tree of the repo (respects .gitignore) that highlights files edited this turn. Toggle with /tree; /tree changed (or the pane's filter button) shows only changed files.",
   "types": "./types/index.d.ts",
   "userConfig": {
